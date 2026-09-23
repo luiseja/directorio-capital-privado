@@ -218,6 +218,16 @@ select.sortsel{
 .owner-toggle.active .dot-avatar{background:var(--gold); color:var(--paper-raised);}
 .crm-savenote{font-size:10.5px; color:var(--ink-faint); margin-top:8px; min-height:14px;}
 .crm-readonly-note{font-size:11.5px; color:var(--ink-faint); font-style:italic;}
+.edit-toggle{
+  background:none; border:1px solid var(--line); border-radius:99px; padding:3px 10px;
+  font-size:11px; color:var(--ink-soft); cursor:pointer;
+}
+.edit-toggle:hover{border-color:var(--gold-line); color:var(--ink);}
+.edit-save{
+  background:var(--ink); color:var(--paper); border:none; border-radius:var(--radius);
+  padding:8px 16px; font-size:12.5px; font-weight:500; cursor:pointer;
+}
+.edit-save:hover{opacity:.9;}
 
 /* ---------- Password gate ---------- */
 #gate{
@@ -285,6 +295,8 @@ select.sortsel{
   padding:5px 9px; font-size:11.8px; color:var(--ink-soft); cursor:default;
 }
 .company-chip b{color:var(--ink); font-weight:500;}
+.company-chip b.op-company{cursor:pointer; border-bottom:1px dotted var(--ink-faint);}
+.company-chip b.op-company:hover{color:var(--gold); border-bottom-color:var(--gold-line);}
 .company-chip .op{color:var(--gold); font-size:10.5px; margin-left:5px; cursor:pointer; border-bottom:1px dotted var(--gold-line);}
 .company-chip .op:hover{color:var(--ink); border-bottom-color:var(--ink-faint);}
 
@@ -356,12 +368,9 @@ footer.foot{max-width:1320px; margin:0 auto; padding:0 28px 40px; color:var(--in
 <div class="layout">
   <aside class="filters">
     <div class="filter-block">
-      <p class="filter-title">Importe buscado</p>
-      <div class="ticket-row">
-        <input type="number" id="ticketAmount" placeholder="M€" min="0" step="0.1">
-        <span>M€</span>
-      </div>
-      <p class="hint">Muestra fondos cuyo rango de inversión cubre ese importe.</p>
+      <p class="filter-title">Tipo de inversión</p>
+      <div class="sector-list" id="categoriaList"></div>
+      <p class="hint">Inferido a partir de la fase de inversión declarada por cada fondo — puede haber algún caso mal clasificado.</p>
     </div>
 
     <div class="filter-block">
@@ -386,6 +395,11 @@ footer.foot{max-width:1320px; margin:0 auto; padding:0 28px 40px; color:var(--in
 
     <div class="filter-block">
       <label class="toggle-row"><input type="checkbox" id="onlyParticipadas"> Solo con empresas participadas listadas</label>
+    </div>
+
+    <div class="filter-block">
+      <p class="filter-title">Importe de inversión <button class="reset-btn" id="resetTicket" style="float:right; display:none;">limpiar</button></p>
+      <div class="sector-list" id="ticketList"></div>
     </div>
 
     <div class="filter-block" style="border-bottom:none;">
@@ -506,8 +520,14 @@ let currentSha = null;
 let storageMode = 'none'; // 'github' | 'none'
 let saveQueue = Promise.resolve(); // serialize writes so concurrent saves don't race each other
 
+const EDITABLE_FIELDS = ['sede','tipo_empresa','ticket_min','ticket_max','fase','geografia','email','web'];
+
 function getCrm(fund){
   return crmData[fund._slug] || {estado:'sin_contactar', accion_tipo:'', accion_fecha:'', proxima_tipo:'', proxima_fecha:'', notas:'', socios:[]};
+}
+function displayFund(f){
+  const ov = getCrm(f).overrides;
+  return ov ? {...f, ...ov} : f;
 }
 function setSaveNote(slug, text){
   const el = document.querySelector(`.card[data-id-slug="${slug}"] .crm-savenote`);
@@ -609,7 +629,24 @@ function slugify(s){
   return s.normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,120) || 'fondo';
 }
-DATA.forEach(f => { f._slug = slugify(f.nombre); });
+function stripAccents(s){ return s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+const VC_KW = ['venture capital','seed','semilla','start up','start-up','startup','early stage','early-stage',
+  'arranque','pre-seed','preseed','presemilla','pre-semilla','series a','serie a'];
+const PE_KW = ['private equity','buyout','buy-out','buy out','lbo','mbo','mbi','growth','crecimiento','expansion',
+  'build-up','build and build','recapitalisation','recapitalizacion','replacement','later stage',
+  'capital expansion','sustitucion','reorientacion','partnership','consolidada','consolidadas',
+  'late stage','escalar','scale up','scale-up','maduras','madura'];
+function classifyCategoria(fase){
+  if (!fase) return null;
+  const t = stripAccents(fase.toLowerCase());
+  const isVc = VC_KW.some(kw => t.includes(stripAccents(kw)));
+  const isPe = PE_KW.some(kw => t.includes(stripAccents(kw)));
+  if (isVc && isPe) return 'Ambos';
+  if (isVc) return 'VC';
+  if (isPe) return 'PE';
+  return null;
+}
+DATA.forEach(f => { f._slug = slugify(f.nombre); f._categoria = classifyCategoria(f.fase); });
 const fundBySlug = Object.fromEntries(DATA.map(f=>[f._slug,f]));
 
 // ---------- Sector & sede indexes ----------
@@ -621,7 +658,22 @@ const sedeCounts = {};
 DATA.forEach(f => { if (f.sede) sedeCounts[f.sede] = (sedeCounts[f.sede]||0)+1; });
 const sedeListArr = Object.entries(sedeCounts).sort((a,b)=>b[1]-a[1]);
 
-const state = { query:'', sectors:new Set(), sedes:new Set(), estados:new Set(), socios:new Set(), ticket:null, onlyParticipadas:false, sort:'nombre', open:new Set() };
+const categoriaCounts = {VC:0, PE:0};
+DATA.forEach(f => {
+  if (f._categoria === 'VC' || f._categoria === 'Ambos') categoriaCounts.VC++;
+  if (f._categoria === 'PE' || f._categoria === 'Ambos') categoriaCounts.PE++;
+});
+const CATEGORIAS = [{v:'VC', label:'Venture Capital'}, {v:'PE', label:'Private Equity'}];
+
+const TICKET_RANGES = [
+  {v:'r0', label:'Menos de 1 M€', lo:0, hi:1},
+  {v:'r1', label:'1 – 5 M€', lo:1, hi:5},
+  {v:'r2', label:'5 – 20 M€', lo:5, hi:20},
+  {v:'r3', label:'20 – 100 M€', lo:20, hi:100},
+  {v:'r4', label:'Más de 100 M€', lo:100, hi:Infinity},
+];
+
+const state = { query:'', sectors:new Set(), sedes:new Set(), estados:new Set(), socios:new Set(), categorias:new Set(), ticketRanges:new Set(), onlyParticipadas:false, sort:'nombre', open:new Set(), editing:new Set() };
 
 const sectorListEl = document.getElementById('sectorList');
 sectorList.forEach(([s,n]) => {
@@ -675,12 +727,40 @@ SOCIOS.forEach(s => {
   socioFilterListEl.appendChild(div);
 });
 
+const categoriaListEl = document.getElementById('categoriaList');
+CATEGORIAS.forEach(c => {
+  const div = document.createElement('div');
+  div.className = 'sector-item';
+  div.innerHTML = `<span>${c.label}</span><span class="n">${categoriaCounts[c.v]}</span>`;
+  div.addEventListener('click', () => {
+    if (state.categorias.has(c.v)) state.categorias.delete(c.v); else state.categorias.add(c.v);
+    render();
+  });
+  div.dataset.categoria = c.v;
+  categoriaListEl.appendChild(div);
+});
+
+const ticketListEl = document.getElementById('ticketList');
+TICKET_RANGES.forEach(r => {
+  const div = document.createElement('div');
+  div.className = 'sector-item';
+  div.innerHTML = `<span>${r.label}</span>`;
+  div.addEventListener('click', () => {
+    if (state.ticketRanges.has(r.v)) state.ticketRanges.delete(r.v); else state.ticketRanges.add(r.v);
+    render();
+  });
+  div.dataset.ticketRange = r.v;
+  ticketListEl.appendChild(div);
+});
+
 // index: sector -> [{empresa, actividad, fondo}] across participadas + inversiones recientes
 const companiesBySector = {};
+// index: empresa (nombre exacto) -> [{actividad, sector, tipo, fondo}] — qué fondos han invertido en ella
+const fundsByCompany = {};
 DATA.forEach(f => {
   [...f.participadas, ...f.inversiones_recientes].forEach(p => {
-    if (!p.sector) return;
-    (companiesBySector[p.sector] ||= []).push({ empresa: p.empresa, actividad: p.actividad, fondo: f.nombre });
+    if (p.sector) (companiesBySector[p.sector] ||= []).push({ empresa: p.empresa, actividad: p.actividad, fondo: f.nombre });
+    if (p.empresa) (fundsByCompany[p.empresa] ||= []).push({ actividad: p.actividad, sector: p.sector, tipo: p.tipo, fondo: f.nombre });
   });
 });
 
@@ -688,6 +768,41 @@ const modalBackdrop = document.getElementById('sectorModalBackdrop');
 const modalTitle = document.getElementById('sectorModalTitle');
 const modalSub = document.getElementById('sectorModalSub');
 const modalBody = document.getElementById('sectorModalBody');
+
+function wireModalFundLinks(){
+  modalBody.querySelectorAll('.mr-fund').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      closeSectorModal();
+      state.query = el.dataset.fund.toLowerCase();
+      document.getElementById('search').value = el.dataset.fund;
+      state.open.add(el.dataset.fund);
+      render();
+      const card = document.querySelector(`.card[data-id="${CSS.escape(el.dataset.fund)}"]`);
+      if (card) card.scrollIntoView({behavior:'smooth', block:'center'});
+    });
+  });
+}
+
+function openCompanyModal(empresa){
+  const rows = (fundsByCompany[empresa] || []).slice().sort((a,b)=> a.fondo.localeCompare(b.fondo,'es'));
+  const seen = new Set();
+  const uniqueRows = rows.filter(r=>{
+    if (seen.has(r.fondo)) return false;
+    seen.add(r.fondo); return true;
+  });
+  modalTitle.textContent = empresa;
+  modalSub.textContent = `${uniqueRows.length} fondo${uniqueRows.length===1?'':'s'} del directorio han invertido en esta empresa`;
+  modalBody.innerHTML = uniqueRows.map(r => `
+    <div class="modal-row">
+      <div>
+        <div class="mr-company">${escapeHtml(r.fondo)}</div>
+        ${r.actividad? `<div class="mr-activity">${escapeHtml(r.actividad)}${r.sector?` · ${escapeHtml(r.sector)}`:''}</div>`:''}
+      </div>
+      <div class="mr-fund" data-fund="${escapeHtml(r.fondo)}">Ver ficha →</div>
+    </div>`).join('') || '<p class="empty-note">Sin fondos registrados para esta empresa.</p>';
+  wireModalFundLinks();
+  modalBackdrop.classList.add('open');
+}
 
 function openSectorModal(sector){
   const rows = (companiesBySector[sector] || []).slice().sort((a,b)=> a.empresa.localeCompare(b.empresa,'es'));
@@ -709,18 +824,7 @@ function openSectorModal(sector){
       <div class="mr-fund" data-fund="${escapeHtml(r.fondo)}">${escapeHtml(r.fondo)}</div>
     </div>`).join('') || '<p class="empty-note">Sin empresas registradas en este sector.</p>';
 
-  modalBody.querySelectorAll('.mr-fund').forEach(el=>{
-    el.addEventListener('click', ()=>{
-      closeSectorModal();
-      state.query = el.dataset.fund.toLowerCase();
-      document.getElementById('search').value = el.dataset.fund;
-      state.open.add(el.dataset.fund);
-      render();
-      const card = document.querySelector(`.card[data-id="${CSS.escape(el.dataset.fund)}"]`);
-      if (card) card.scrollIntoView({behavior:'smooth', block:'center'});
-    });
-  });
-
+  wireModalFundLinks();
   modalBackdrop.classList.add('open');
 }
 function closeSectorModal(){ modalBackdrop.classList.remove('open'); }
@@ -762,11 +866,20 @@ function matches(f){
       if (!any) return false;
     }
   }
-  if (state.ticket!=null){
+  if (state.categorias.size){
+    if (!(f._categoria && (state.categorias.has(f._categoria) || f._categoria === 'Ambos'))) return false;
+  }
+  if (state.ticketRanges.size){
     const lo = f.ticket_min, hi = f.ticket_max;
     if (lo==null && hi==null) return false;
-    if (lo!=null && state.ticket < lo) return false;
-    if (hi!=null && state.ticket > hi) return false;
+    const fundLo = lo==null ? 0 : lo;
+    const fundHi = hi==null ? Infinity : hi;
+    let any = false;
+    for (const rv of state.ticketRanges){
+      const r = TICKET_RANGES.find(x=>x.v===rv);
+      if (fundLo <= r.hi && fundHi >= r.lo) { any = true; break; }
+    }
+    if (!any) return false;
   }
   if (state.onlyParticipadas && f.participadas.length===0) return false;
   return true;
@@ -809,8 +922,15 @@ function render(){
     el.classList.toggle('active', state.socios.has(el.dataset.socio));
   });
   document.getElementById('resetSocios').style.display = state.socios.size ? 'inline' : 'none';
+  document.querySelectorAll('#categoriaList .sector-item').forEach(el=>{
+    el.classList.toggle('active', state.categorias.has(el.dataset.categoria));
+  });
+  document.querySelectorAll('#ticketList .sector-item').forEach(el=>{
+    el.classList.toggle('active', state.ticketRanges.has(el.dataset.ticketRange));
+  });
+  document.getElementById('resetTicket').style.display = state.ticketRanges.size ? 'inline' : 'none';
 
-  const filtered = DATA.filter(matches).sort(sortFn);
+  const filtered = DATA.map(displayFund).filter(matches).sort(sortFn);
   foundLine.innerHTML = `<b>${filtered.length}</b> fondo${filtered.length===1?'':'s'}`;
 
   if (!filtered.length){
@@ -834,6 +954,12 @@ function render(){
     el.addEventListener('click', (e)=>{
       e.stopPropagation();
       openSectorModal(el.dataset.sector);
+    });
+  });
+  cardsEl.querySelectorAll('.company-chip .op-company[data-company]').forEach(el=>{
+    el.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      openCompanyModal(el.dataset.company);
     });
   });
 
@@ -862,6 +988,61 @@ function render(){
       saveCrm(fund, {socios: next});
     });
   });
+
+  cardsEl.querySelectorAll('[data-edit-toggle]').forEach(el=>{
+    el.addEventListener('click', e=>{
+      e.stopPropagation();
+      const slug = el.closest('.card').dataset.idSlug;
+      if (state.editing.has(slug)) state.editing.delete(slug); else state.editing.add(slug);
+      render();
+    });
+  });
+  cardsEl.querySelectorAll('[data-edit-save]').forEach(el=>{
+    el.addEventListener('click', e=>{
+      e.stopPropagation();
+      const card = el.closest('.card');
+      const slug = card.dataset.idSlug;
+      const fund = fundBySlug[slug];
+      const patch = {};
+      card.querySelectorAll('[data-editfield]').forEach(input=>{
+        const key = input.dataset.editfield;
+        let val = input.value.trim();
+        if (key === 'ticket_min' || key === 'ticket_max'){
+          val = val === '' ? null : parseFloat(val);
+        }
+        patch[key] = val;
+      });
+      const currentOverrides = getCrm(fund).overrides || {};
+      saveCrm(fund, {overrides: {...currentOverrides, ...patch}}, {skipRender:true});
+      state.editing.delete(slug);
+      render();
+    });
+  });
+}
+
+function editFormHtml(f){
+  const fields = [
+    {k:'sede', label:'Sede', type:'text'},
+    {k:'tipo_empresa', label:'Descripción / tipo', type:'textarea'},
+    {k:'ticket_min', label:'Ticket mínimo (M€)', type:'number'},
+    {k:'ticket_max', label:'Ticket máximo (M€)', type:'number'},
+    {k:'fase', label:'Fase de inversión', type:'text'},
+    {k:'geografia', label:'Preferencias geográficas', type:'text'},
+    {k:'email', label:'Email', type:'text'},
+    {k:'web', label:'Web', type:'text'},
+  ];
+  const rows = fields.map(fld=>{
+    const val = f[fld.k] == null ? '' : f[fld.k];
+    if (fld.type === 'textarea'){
+      return `<div class="crm-field wide"><label>${fld.label}</label><textarea data-editfield="${fld.k}">${escapeHtml(String(val))}</textarea></div>`;
+    }
+    return `<div class="crm-field"><label>${fld.label}</label><input type="${fld.type}" step="0.1" data-editfield="${fld.k}" value="${escapeHtml(String(val))}"></div>`;
+  }).join('');
+  return `<div class="crm-grid" style="margin-top:10px;">${rows}</div>
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <button class="edit-save" data-edit-save>Guardar cambios</button>
+    </div>
+    <p class="hint" style="margin-top:6px;">Estos datos vienen del anuario original; al guardar, tu corrección los sustituye para todo el equipo.</p>`;
 }
 
 function cardHtml(f){
@@ -880,14 +1061,14 @@ function cardHtml(f){
     </div>`).join('')}</div>` : `<p class="empty-note">Sin contactos publicados en el anuario.</p>`;
 
   const participadasHtml = f.participadas.length ? `<div class="company-chips">${f.participadas.map(p=>`
-    <span class="company-chip"><b>${escapeHtml(p.empresa)}</b>${p.sector?`<span class="op" data-sector="${escapeHtml(p.sector)}">${escapeHtml(p.sector)}</span>`:(p.tipo?`<span class="op">${escapeHtml(p.tipo)}</span>`:'')}</span>`).join('')}</div>`
+    <span class="company-chip"><b class="op-company" data-company="${escapeHtml(p.empresa)}">${escapeHtml(p.empresa)}</b>${p.sector?`<span class="op" data-sector="${escapeHtml(p.sector)}">${escapeHtml(p.sector)}</span>`:(p.tipo?`<span class="op">${escapeHtml(p.tipo)}</span>`:'')}</span>`).join('')}</div>`
     : (f.inversiones_recientes.length ? `<p class="empty-note">No publica cartera histórica; ver inversiones recientes abajo.</p>` : `<p class="empty-note">No publicado en el anuario.</p>`);
 
   const inversionesHtml = f.inversiones_recientes.length ? `
     <div class="body-section">
       <h4>Inversiones recientes</h4>
       <div class="company-chips">${f.inversiones_recientes.map(p=>`
-        <span class="company-chip"><b>${escapeHtml(p.empresa)}</b>${p.sector?`<span class="op" data-sector="${escapeHtml(p.sector)}">${escapeHtml(p.sector)}</span>`:(p.tipo?`<span class="op">${escapeHtml(p.tipo)}</span>`:'')}</span>`).join('')}</div>
+        <span class="company-chip"><b class="op-company" data-company="${escapeHtml(p.empresa)}">${escapeHtml(p.empresa)}</b>${p.sector?`<span class="op" data-sector="${escapeHtml(p.sector)}">${escapeHtml(p.sector)}</span>`:(p.tipo?`<span class="op">${escapeHtml(p.tipo)}</span>`:'')}</span>`).join('')}</div>
     </div>` : '';
 
   const estadoOptions = ESTADOS.map(e=>`<option value="${e.v}" ${e.v===crm.estado?'selected':''}>${e.label}</option>`).join('');
@@ -963,9 +1144,14 @@ function cardHtml(f){
       <div class="body-grid">
         <div>
           <div class="body-section">
-            <h4>Sobre el fondo</h4>
-            <p class="desc">${escapeHtml(f.tipo_empresa) || '<span class="empty-note">Sin descripción publicada.</span>'}</p>
+            <div style="display:flex; align-items:center; justify-content:space-between;">
+              <h4 style="margin-bottom:0;">Sobre el fondo</h4>
+              ${crmEditable ? `<button class="edit-toggle" data-edit-toggle>${state.editing.has(f._slug) ? 'Cancelar' : 'Editar datos ✎'}</button>` : ''}
+            </div>
+            ${state.editing.has(f._slug) ? editFormHtml(f) : `
+            <p class="desc" style="margin-top:8px;">${escapeHtml(f.tipo_empresa) || '<span class="empty-note">Sin descripción publicada.</span>'}</p>
             <dl class="kv" style="margin-top:10px;">
+              ${f.sede? `<dt>Sede</dt><dd>${escapeHtml(f.sede)}</dd>`:''}
               ${f.anio_inicio? `<dt>Año de inicio</dt><dd>${escapeHtml(f.anio_inicio)}</dd>`:''}
               ${f.tipo_financiacion? `<dt>Tipo de financiación</dt><dd>${escapeHtml(f.tipo_financiacion)}</dd>`:''}
               ${f.principales_inversores? `<dt>Principales inversores</dt><dd>${escapeHtml(f.principales_inversores)}</dd>`:''}
@@ -974,7 +1160,7 @@ function cardHtml(f){
             <div class="linkline">
               ${f.web? `<a href="${f.web.startsWith('http')?f.web:'https://'+f.web}" target="_blank" rel="noopener">${escapeHtml(f.web)}</a>`:''}
               ${f.email? `<a href="mailto:${escapeHtml(f.email)}">${escapeHtml(f.email)}</a>`:''}
-            </div>
+            </div>`}
           </div>
           <div class="body-section">
             <h4>Sectores de interés</h4>
@@ -1002,22 +1188,17 @@ function cardHtml(f){
 }
 
 document.getElementById('search').addEventListener('input', e=>{ state.query = e.target.value.trim().toLowerCase(); render(); });
-document.getElementById('ticketAmount').addEventListener('input', e=>{
-  const v = parseFloat(e.target.value);
-  state.ticket = isNaN(v) ? null : v;
-  render();
-});
 document.getElementById('onlyParticipadas').addEventListener('change', e=>{ state.onlyParticipadas = e.target.checked; render(); });
 document.getElementById('sortSel').addEventListener('change', e=>{ state.sort = e.target.value; render(); });
 document.getElementById('resetSectors').addEventListener('click', ()=>{ state.sectors.clear(); render(); });
 document.getElementById('resetSedes').addEventListener('click', ()=>{ state.sedes.clear(); render(); });
 document.getElementById('resetEstados').addEventListener('click', ()=>{ state.estados.clear(); render(); });
 document.getElementById('resetSocios').addEventListener('click', ()=>{ state.socios.clear(); render(); });
+document.getElementById('resetTicket').addEventListener('click', ()=>{ state.ticketRanges.clear(); render(); });
 document.getElementById('resetAll').addEventListener('click', ()=>{
   state.query=''; state.sectors.clear(); state.sedes.clear(); state.estados.clear(); state.socios.clear();
-  state.ticket=null; state.onlyParticipadas=false; state.sort='nombre';
+  state.categorias.clear(); state.ticketRanges.clear(); state.onlyParticipadas=false; state.sort='nombre';
   document.getElementById('search').value='';
-  document.getElementById('ticketAmount').value='';
   document.getElementById('onlyParticipadas').checked=false;
   document.getElementById('sortSel').value='nombre';
   render();
