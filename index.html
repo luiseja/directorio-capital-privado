@@ -327,6 +327,7 @@ select.sortsel{
   font-size:11px; color:var(--gold); text-align:right; align-self:center; white-space:nowrap; cursor:pointer;
 }
 .modal-row .mr-fund:hover{text-decoration:underline;}
+.modal code{background:var(--tag-bg); color:var(--tag-ink); padding:1px 5px; border-radius:3px; font-family:'IBM Plex Mono',monospace; font-size:11px;}
 .empty-note{font-size:12px; color:var(--ink-faint); font-style:italic;}
 
 .no-results{padding:60px 20px; text-align:center; color:var(--ink-faint);}
@@ -360,10 +361,36 @@ footer.foot{max-width:1320px; margin:0 auto; padding:0 28px 40px; color:var(--in
     </div>
     <div class="count-pill" id="countPill">172 fondos</div>
   </div>
-  <div class="top-inner" style="padding-top:0; padding-bottom:10px;">
+  <div class="top-inner" style="padding-top:0; padding-bottom:10px; justify-content:space-between;">
     <span class="hint" id="syncNote" style="color:var(--gold);"></span>
+    <button class="reset-btn" id="bulkImportOpen" style="display:none;">Actualización masiva ⇅</button>
   </div>
 </header>
+
+<div class="modal-backdrop" id="bulkModalBackdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h3>Actualización masiva</h3>
+        <div class="sub">Una línea por fondo: <code>Nombre del fondo | Socio | Estado | Campaña</code></div>
+      </div>
+      <button class="modal-close" id="bulkModalClose" aria-label="Cerrar">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <p class="hint" style="margin-bottom:10px;">
+        Deja un campo vacío para no tocarlo (ej: <code>Kibo Ventures | | Reunión agendada</code> solo cambia el estado).
+        El nombre del fondo no hace falta que sea exacto — busca la coincidencia más parecida.
+      </p>
+      <textarea id="bulkText" placeholder="Kibo Ventures | Alfonso Jiménez | Contactado | 2026&#10;4Founders Capital | | Reunión agendada |&#10;Advent International | Cristina Villa | | 2025" style="width:100%; min-height:160px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:10px; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper-raised); color:var(--ink);"></textarea>
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <button class="edit-save" id="bulkApply">Aplicar cambios</button>
+      </div>
+      <div id="bulkResults" style="margin-top:14px;"></div>
+    </div>
+  </div>
+</div>
 
 <div class="layout">
   <aside class="filters">
@@ -386,6 +413,11 @@ footer.foot{max-width:1320px; margin:0 auto; padding:0 28px 40px; color:var(--in
     <div class="filter-block">
       <p class="filter-title">Estado <button class="reset-btn" id="resetEstados" style="float:right; display:none;">limpiar</button></p>
       <div class="sector-list" id="estadoList"></div>
+    </div>
+
+    <div class="filter-block">
+      <p class="filter-title">Campaña <button class="reset-btn" id="resetCampanas" style="float:right; display:none;">limpiar</button></p>
+      <div class="sector-list" id="campanaList"></div>
     </div>
 
     <div class="filter-block">
@@ -584,6 +616,7 @@ async function initStorage(){
     currentSha = sha;
     storageMode = 'github';
     if (sn) sn.textContent = 'Seguimiento comercial compartido en vivo con el equipo.';
+    document.getElementById('bulkImportOpen').style.display = 'inline';
   }catch(e){
     storageMode = 'none';
     if (sn) sn.textContent = 'No se pudo cargar el seguimiento comercial compartido.';
@@ -617,6 +650,10 @@ const ESTADOS = [
 ];
 const ESTADO_BY_V = Object.fromEntries(ESTADOS.map(e=>[e.v,e]));
 const ACCIONES = ['Llamada','Email','Reunión','Mensaje LinkedIn','Propuesta enviada','Seguimiento','Presentación','Otro'];
+const CAMPANAS = [
+  {v:'2025', label:'Campaña 2025'},
+  {v:'2026', label:'Campaña 2026'},
+];
 const SOCIOS = [
   {id:'luis', nombre:'Luis Verdeja', ini:'LV'},
   {id:'alfonso', nombre:'Alfonso Jiménez', ini:'AJ'},
@@ -673,7 +710,7 @@ const TICKET_RANGES = [
   {v:'r4', label:'Más de 100 M€', lo:100, hi:Infinity},
 ];
 
-const state = { query:'', sectors:new Set(), sedes:new Set(), estados:new Set(), socios:new Set(), categorias:new Set(), ticketRanges:new Set(), onlyParticipadas:false, sort:'nombre', open:new Set(), editing:new Set() };
+const state = { query:'', sectors:new Set(), sedes:new Set(), estados:new Set(), socios:new Set(), categorias:new Set(), campanas:new Set(), ticketRanges:new Set(), onlyParticipadas:false, sort:'nombre', open:new Set(), editing:new Set() };
 
 const sectorListEl = document.getElementById('sectorList');
 sectorList.forEach(([s,n]) => {
@@ -712,6 +749,19 @@ ESTADOS.forEach(e => {
   });
   div.dataset.estado = e.v;
   estadoListEl.appendChild(div);
+});
+
+const campanaListEl = document.getElementById('campanaList');
+CAMPANAS.forEach(c => {
+  const div = document.createElement('div');
+  div.className = 'sector-item';
+  div.innerHTML = `<span>${c.label}</span>`;
+  div.addEventListener('click', () => {
+    if (state.campanas.has(c.v)) state.campanas.delete(c.v); else state.campanas.add(c.v);
+    render();
+  });
+  div.dataset.campana = c.v;
+  campanaListEl.appendChild(div);
 });
 
 const socioFilterListEl = document.getElementById('socioFilterList');
@@ -832,6 +882,90 @@ document.getElementById('sectorModalClose').addEventListener('click', closeSecto
 modalBackdrop.addEventListener('click', (e)=>{ if (e.target === modalBackdrop) closeSectorModal(); });
 document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeSectorModal(); });
 
+// ---------- Bulk update ----------
+function normalizeStr(s){ return stripAccents(String(s).trim().toLowerCase()); }
+
+function findFundByQuery(q){
+  if (!q) return {status:'skip'};
+  const nq = normalizeStr(q);
+  const exact = DATA.find(f => normalizeStr(f.nombre) === nq);
+  if (exact) return {status:'ok', fund:exact};
+  const matches = DATA.filter(f => normalizeStr(f.nombre).includes(nq) || nq.includes(normalizeStr(f.nombre)));
+  if (matches.length === 1) return {status:'ok', fund:matches[0]};
+  if (matches.length > 1) return {status:'ambiguous', candidates: matches.map(f=>f.nombre)};
+  return {status:'notfound'};
+}
+function findSocioByQuery(q){
+  if (!q) return {status:'skip'};
+  const nq = normalizeStr(q);
+  const found = SOCIOS.find(s => {
+    const full = normalizeStr(s.nombre), first = normalizeStr(s.nombre.split(' ')[0]);
+    return full === nq || full.includes(nq) || first === nq;
+  });
+  return found ? {status:'ok', socio:found} : {status:'notfound'};
+}
+function findEstadoByQuery(q){
+  if (!q) return {status:'skip'};
+  const nq = normalizeStr(q);
+  const found = ESTADOS.find(e => {
+    const label = normalizeStr(e.label);
+    return label === nq || label.includes(nq) || nq.includes(label) || normalizeStr(e.v) === nq;
+  });
+  return found ? {status:'ok', estado:found} : {status:'notfound'};
+}
+function findCampanaByQuery(q){
+  if (!q) return {status:'skip'};
+  const nq = normalizeStr(q);
+  const found = CAMPANAS.find(c => {
+    const label = normalizeStr(c.label);
+    return label === nq || label.includes(nq) || nq.includes(label) || normalizeStr(c.v) === nq || nq.endsWith(c.v);
+  });
+  return found ? {status:'ok', campana:found} : {status:'notfound'};
+}
+
+const bulkBackdrop = document.getElementById('bulkModalBackdrop');
+document.getElementById('bulkImportOpen').addEventListener('click', ()=>{
+  document.getElementById('bulkResults').innerHTML = '';
+  bulkBackdrop.classList.add('open');
+});
+document.getElementById('bulkModalClose').addEventListener('click', ()=> bulkBackdrop.classList.remove('open'));
+bulkBackdrop.addEventListener('click', (e)=>{ if (e.target === bulkBackdrop) bulkBackdrop.classList.remove('open'); });
+
+document.getElementById('bulkApply').addEventListener('click', async ()=>{
+  const lines = document.getElementById('bulkText').value.split('\n').map(l=>l.trim()).filter(Boolean);
+  const results = [];
+  for (const line of lines){
+    const parts = line.split('|').map(p=>p.trim());
+    const [fundQ, socioQ, estadoQ, campanaQ] = [parts[0]||'', parts[1]||'', parts[2]||'', parts[3]||''];
+    const fr = findFundByQuery(fundQ);
+    if (fr.status === 'notfound'){ results.push({line, ok:false, msg:`Fondo no encontrado: "${fundQ}"`}); continue; }
+    if (fr.status === 'ambiguous'){ results.push({line, ok:false, msg:`Nombre ambiguo — coincide con: ${fr.candidates.join(', ')}`}); continue; }
+    if (fr.status === 'skip'){ results.push({line, ok:false, msg:'Falta el nombre del fondo'}); continue; }
+
+    const sr = findSocioByQuery(socioQ);
+    if (sr.status === 'notfound'){ results.push({line, ok:false, msg:`Socio no reconocido: "${socioQ}"`}); continue; }
+    const er = findEstadoByQuery(estadoQ);
+    if (er.status === 'notfound'){ results.push({line, ok:false, msg:`Estado no reconocido: "${estadoQ}"`}); continue; }
+    const cr = findCampanaByQuery(campanaQ);
+    if (cr.status === 'notfound'){ results.push({line, ok:false, msg:`Campaña no reconocida: "${campanaQ}"`}); continue; }
+
+    const patch = {};
+    if (sr.status === 'ok') patch.socios = [sr.socio.id];
+    if (er.status === 'ok') patch.estado = er.estado.v;
+    if (cr.status === 'ok') patch.campana = cr.campana.v;
+    if (Object.keys(patch).length === 0){ results.push({line, ok:false, msg:'Nada que actualizar en esta línea'}); continue; }
+
+    saveCrm(fr.fund, patch, {skipRender:true});
+    results.push({line, ok:true, msg:`${fr.fund.nombre} actualizado`});
+  }
+  await saveQueue;
+  render();
+  document.getElementById('bulkResults').innerHTML = results.map(r=>`
+    <div style="padding:6px 0; border-bottom:1px solid var(--line-soft); font-size:12px; color:${r.ok?'var(--status-positive)':'var(--status-negative)'};">
+      ${r.ok ? '✓' : '✕'} ${escapeHtml(r.msg)}
+    </div>`).join('');
+});
+
 function fmtTicket(f){
   if (f.ticket_min==null && f.ticket_max==null) return '—';
   if (f.ticket_min!=null && f.ticket_max!=null) return `${trimNum(f.ticket_min)}–${trimNum(f.ticket_max)} M€`;
@@ -856,7 +990,7 @@ function matches(f){
     if (!any) return false;
   }
   if (state.sedes.size && !state.sedes.has(f.sede)) return false;
-  if (state.estados.size || state.socios.size){
+  if (state.estados.size || state.socios.size || state.campanas.size){
     const crm = getCrm(f);
     if (state.estados.size && !state.estados.has(crm.estado || 'sin_contactar')) return false;
     if (state.socios.size){
@@ -865,6 +999,7 @@ function matches(f){
       for (const s of state.socios) if (owned.includes(s)) { any = true; break; }
       if (!any) return false;
     }
+    if (state.campanas.size && !state.campanas.has(crm.campana)) return false;
   }
   if (state.categorias.size){
     if (!(f._categoria && (state.categorias.has(f._categoria) || f._categoria === 'Ambos'))) return false;
@@ -918,6 +1053,10 @@ function render(){
     el.classList.toggle('active', state.estados.has(el.dataset.estado));
   });
   document.getElementById('resetEstados').style.display = state.estados.size ? 'inline' : 'none';
+  document.querySelectorAll('#campanaList .sector-item').forEach(el=>{
+    el.classList.toggle('active', state.campanas.has(el.dataset.campana));
+  });
+  document.getElementById('resetCampanas').style.display = state.campanas.size ? 'inline' : 'none';
   document.querySelectorAll('#socioFilterList .sector-item').forEach(el=>{
     el.classList.toggle('active', state.socios.has(el.dataset.socio));
   });
@@ -1052,6 +1191,7 @@ function cardHtml(f){
   const extra = f.sectores.length - visibleTags.length;
   const crm = getCrm(f);
   const estadoInfo = ESTADO_BY_V[crm.estado] || ESTADOS[0];
+  const campanaInfo = CAMPANAS.find(c => c.v === crm.campana);
   const owners = (crm.socios || []).map(id2 => SOCIO_BY_ID[id2]).filter(Boolean);
 
   const contactsHtml = f.contactos.length ? `<div class="contact-list">${f.contactos.map(c=>`
@@ -1072,6 +1212,7 @@ function cardHtml(f){
     </div>` : '';
 
   const estadoOptions = ESTADOS.map(e=>`<option value="${e.v}" ${e.v===crm.estado?'selected':''}>${e.label}</option>`).join('');
+  const campanaOptions = `<option value="">Sin asignar</option>` + CAMPANAS.map(c=>`<option value="${c.v}" ${c.v===crm.campana?'selected':''}>${c.label}</option>`).join('');
   const accionOptions = (sel) => `<option value=""></option>` + ACCIONES.map(a=>`<option value="${a}" ${a===sel?'selected':''}>${a}</option>`).join('');
   const ownerTogglesHtml = SOCIOS.map(s=>{
     const active = (crm.socios||[]).includes(s.id);
@@ -1085,6 +1226,10 @@ function cardHtml(f){
         <div class="crm-field">
           <label>Estado</label>
           <select data-crm="estado">${estadoOptions}</select>
+        </div>
+        <div class="crm-field">
+          <label>Campaña</label>
+          <select data-crm="campana">${campanaOptions}</select>
         </div>
         <div class="crm-field">
           <label>Socios asignados</label>
@@ -1119,6 +1264,7 @@ function cardHtml(f){
         <div class="card-title-row">
           <h3>${escapeHtml(f.nombre)}</h3>
           <span class="status-badge ${estadoInfo.cls}"><span class="dot"></span>${estadoInfo.label}</span>
+          ${campanaInfo ? `<span class="status-badge status-neutral">${campanaInfo.label}</span>` : ''}
           ${owners.length ? `<span class="owner-avatars">${owners.map(o=>`<span class="owner-avatar" title="${escapeHtml(o.nombre)}">${o.ini}</span>`).join('')}</span>` : ''}
         </div>
         <div class="card-meta">
@@ -1193,11 +1339,12 @@ document.getElementById('sortSel').addEventListener('change', e=>{ state.sort = 
 document.getElementById('resetSectors').addEventListener('click', ()=>{ state.sectors.clear(); render(); });
 document.getElementById('resetSedes').addEventListener('click', ()=>{ state.sedes.clear(); render(); });
 document.getElementById('resetEstados').addEventListener('click', ()=>{ state.estados.clear(); render(); });
+document.getElementById('resetCampanas').addEventListener('click', ()=>{ state.campanas.clear(); render(); });
 document.getElementById('resetSocios').addEventListener('click', ()=>{ state.socios.clear(); render(); });
 document.getElementById('resetTicket').addEventListener('click', ()=>{ state.ticketRanges.clear(); render(); });
 document.getElementById('resetAll').addEventListener('click', ()=>{
   state.query=''; state.sectors.clear(); state.sedes.clear(); state.estados.clear(); state.socios.clear();
-  state.categorias.clear(); state.ticketRanges.clear(); state.onlyParticipadas=false; state.sort='nombre';
+  state.categorias.clear(); state.campanas.clear(); state.ticketRanges.clear(); state.onlyParticipadas=false; state.sort='nombre';
   document.getElementById('search').value='';
   document.getElementById('onlyParticipadas').checked=false;
   document.getElementById('sortSel').value='nombre';
